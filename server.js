@@ -54,7 +54,13 @@ async function transcribeWav(wavBuf) {
 
 const app    = express();
 const server = http.createServer(app);
-const io     = new Server(server, { cors: { origin: '*' } });
+const io     = new Server(server, {
+  cors: { origin: '*' },
+  transports: ['websocket'],        // WebSocket tu — punguza latency
+  perMessageDeflate: false,         // Usicompress video frames (tayari JPEG)
+  httpCompression: false,
+  maxHttpBufferSize: 2e6            // 2MB max frame size
+});
 
 // PTT audio accumulator for STT: socketId → Float32 samples[]
 const pttAudioBuffers = new Map();
