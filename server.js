@@ -400,15 +400,30 @@ io.on('connection', (socket) => {
   // ── Audio: Soldier → CP (live stream) ────────────────────────────────────
   socket.on('audio-soldier', (payload) => {
     const s = activeSoldiers.get(socket.id);
+
+    // Geuza payload kuwa Float32 array halisi
+    // Android inatuma Array<Float> — inaweza kuja kama Buffer au Array
+    let floats;
+    if (Buffer.isBuffer(payload)) {
+      // Binary buffer: tafsiri kama IEEE 754 float32 little-endian
+      floats = Array.from(new Float32Array(payload.buffer, payload.byteOffset, payload.byteLength / 4));
+    } else if (Array.isArray(payload)) {
+      floats = payload.map(Number);
+    } else {
+      floats = Array.from(payload).map(Number);
+    }
+
     io.to('cp').emit('audio-from-soldier', {
       socketId: socket.id,
-      name: s?.name || 'Unknown',
-      audio: payload
+      name:     s?.name || 'Unknown',
+      rank:     s?.rank || '',
+      audio:    floats
     });
+
     // Accumulate for STT
     const buf = pttAudioBuffers.get(socket.id);
     if (buf && buf.length < MAX_PTT_SAMPLES) {
-      for (const v of payload) buf.push(Number(v));
+      for (const v of floats) buf.push(v);
     }
   });
 
