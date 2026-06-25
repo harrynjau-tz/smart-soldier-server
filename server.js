@@ -63,6 +63,9 @@ const io     = new Server(server, {
 const pttAudioBuffers = new Map();
 const MAX_PTT_SAMPLES = 16000 * 60;
 
+// PTT package-mode accumulator (new): socketId → { meta, samples[] }
+const pttPackageBuffers = new Map();
+
 // ── Single active CP session tracker ────────────────────────────────────────
 // Only one admin can be logged into the CP at a time.
 // { socketId, adminUsername, adminName }
@@ -460,6 +463,64 @@ io.on('connection', (socket) => {
     });
   });
 
+  // ── PTT package mode: Android records → sends complete package ───────────
+  socket.on('ptt-audio-package', (meta) => {
+    const s = activeSoldiers.get(socket.id);
+    if (!s) return;
+    pttPackageBuffers.set(socket.id, {
+      totalSamples: meta.totalSamples,
+      sampleRate:   meta.sampleRate || 16000,
+      samples:      []
+    });
+    // Onyesha banner kwenye CP mara moja
+    io.to('cp').emit('ptt-start', { socketId: socket.id, name: s.name, rank: s.rank, unit: s.unit });
+    console.log(`[PTT-PKG] ${s.rank} ${s.name} — inaanza kupokea package (${meta.totalSamples} samples)`);
+  });
+
+  socket.on('ptt-audio-chunk', (chunk) => {
+    const pkg = pttPackageBuffers.get(socket.id);
+    if (!pkg) return;
+    const arr = Array.isArray(chunk) ? chunk.map(Number) : Array.from(chunk).map(Number);
+    for (const v of arr) pkg.samples.push(v);
+  });
+
+  socket.on('ptt-audio-end', async () => {
+    const s   = activeSoldiers.get(socket.id);
+    const pkg = pttPackageBuffers.get(socket.id);
+    pttPackageBuffers.delete(socket.id);
+    if (!s || !pkg) return;
+
+    const samples = pkg.samples;
+    const durSec  = (samples.length / 16000).toFixed(1);
+    console.log(`[PTT-PKG] ${s.name} — package kamili: ${samples.length} samples (${durSec}s)`);
+
+    // Tuma sauti nzima kwa CP ili ichezwe
+    io.to('cp').emit('ptt-audio-complete', {
+      socketId: socket.id,
+      name:     s.name,
+      rank:     s.rank,
+      audio:    samples
+    });
+
+    // Ficha banner PTT
+    io.to('cp').emit('ptt-stop', { socketId: socket.id, name: s.name, rank: s.rank });
+
+    if (samples.length < 1600) return;   // chini ya 0.1s — puuza STT
+
+    // Transcript kupitia Whisper
+    io.to('cp').emit('ptt-transcript', {
+      socketId: socket.id, badge: s.badgeNumber,
+      name: s.name, rank: s.rank, text: null, processing: true
+    });
+    const text = await transcribeWav(encodeWav(samples));
+    if (text) console.log(`[STT] ${s.name}: "${text}"`);
+    io.to('cp').emit('ptt-transcript', {
+      socketId: socket.id, badge: s.badgeNumber,
+      name: s.name, rank: s.rank,
+      text: text || null, processing: false, time: Date.now()
+    });
+  });
+
   // ── Audio: CP → Soldier (live stream) ────────────────────────────────────
   socket.on('audio-cp', (payload) => {
     const isBroadcast = payload.targetId === 'all';
@@ -560,6 +621,7 @@ io.on('connection', (socket) => {
   // ── Disconnect ────────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
     pttAudioBuffers.delete(socket.id);
+    pttPackageBuffers.delete(socket.id);
     // Clear activeCP if this was the logged-in CP
     if (activeCP && activeCP.socketId === socket.id) {
       console.log(`[CP] "${activeCP.adminUsername}" amekatika`);
