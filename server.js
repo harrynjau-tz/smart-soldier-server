@@ -66,6 +66,9 @@ const MAX_PTT_SAMPLES = 16000 * 60;
 // PTT package-mode accumulator (new): socketId → { meta, samples[] }
 const pttPackageBuffers = new Map();
 
+// CP audio package accumulator: socketId → { targetId, samples[] }
+const cpPackageBuffers = new Map();
+
 // ── Single active CP session tracker ────────────────────────────────────────
 // Only one admin can be logged into the CP at a time.
 // { socketId, adminUsername, adminName }
@@ -521,7 +524,34 @@ io.on('connection', (socket) => {
     });
   });
 
-  // ── Audio: CP → Soldier (live stream) ────────────────────────────────────
+  // ── Audio: CP → Soldier (package mode) ──────────────────────────────────
+  socket.on('cp-audio-package', (meta) => {
+    cpPackageBuffers.set(socket.id, { targetId: meta.targetId, samples: [] });
+    console.log(`[CP-PKG] CP inaanza kutuma sauti kwa ${meta.targetId} (${meta.totalSamples} samples)`);
+  });
+
+  socket.on('cp-audio-chunk', (data) => {
+    const pkg = cpPackageBuffers.get(socket.id);
+    if (!pkg) return;
+    const arr = Array.isArray(data.audio) ? data.audio.map(Number) : [];
+    for (const v of arr) pkg.samples.push(v);
+  });
+
+  socket.on('cp-audio-end', (data) => {
+    const pkg = cpPackageBuffers.get(socket.id);
+    cpPackageBuffers.delete(socket.id);
+    if (!pkg || !pkg.samples.length) return;
+    const isBroadcast = pkg.targetId === 'all';
+    const payload = { audio: pkg.samples, broadcast: isBroadcast };
+    if (isBroadcast) {
+      io.to('soldiers').emit('cp-audio-complete', payload);
+    } else {
+      io.to(pkg.targetId).emit('cp-audio-complete', payload);
+    }
+    console.log(`[CP-PKG] Imetuma sauti kwa ${pkg.targetId} — ${(pkg.samples.length/16000).toFixed(1)}s`);
+  });
+
+  // ── Audio: CP → Soldier (legacy live stream — kept for compatibility) ─────
   socket.on('audio-cp', (payload) => {
     const isBroadcast = payload.targetId === 'all';
     const data = { audio: payload.audio, broadcast: isBroadcast };
@@ -622,6 +652,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     pttAudioBuffers.delete(socket.id);
     pttPackageBuffers.delete(socket.id);
+    cpPackageBuffers.delete(socket.id);
     // Clear activeCP if this was the logged-in CP
     if (activeCP && activeCP.socketId === socket.id) {
       console.log(`[CP] "${activeCP.adminUsername}" amekatika`);
